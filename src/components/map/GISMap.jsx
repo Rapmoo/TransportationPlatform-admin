@@ -4,6 +4,7 @@ import Map from 'ol/Map';
 import View from 'ol/View';
 import TileLayer from 'ol/layer/Tile';
 import VectorLayer from 'ol/layer/Vector';
+import Heatmap from 'ol/layer/Heatmap';
 import VectorSource from 'ol/source/Vector';
 import XYZ from 'ol/source/XYZ';
 import Feature from 'ol/Feature';
@@ -14,18 +15,14 @@ import Overlay from 'ol/Overlay';
 import FullScreen from 'ol/control/FullScreen';
 import { useLocale } from '../../context/LocaleContext';
 import { useWorkerData } from '../../context/WorkerDataContext';
-import { createDensityHeatmap } from './heatmapLayer';
+import { LAYER_DEFS } from './layerDefs';
+import { buildHeatPoints, readCoord } from './heatmapData';
+
+export { LAYER_DEFS };
 
 function escapeHtml(value) {
-  return String(value ?? '').replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('\"', '&quot;').replaceAll("'", '&#39;');
+  return String(value ?? '').replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;').replaceAll("'", '&#39;');
 }
-
-export const LAYER_DEFS = [
-  { key: 'home', label: 'Home locations', color: '#0E7C86', field: 'home_coords', addr: 'home_address' },
-  { key: 'start', label: 'Starting transportation points', color: '#B9791F', field: 'start_point_coords', addr: 'start_point_address' },
-  { key: 'boarding', label: 'Boarding points', color: '#7A4FB5', field: 'boarding_coords', addr: 'boarding_address' },
-  { key: 'after_work', label: 'After-work bus boarding points', color: '#D85C3A', field: 'after_work_bus_pickup_coords', addr: 'after_work_bus_pickup_address' },
-];
 
 const BASEMAPS = {
   standard: {
@@ -38,19 +35,41 @@ const BASEMAPS = {
   },
 };
 
-function makeHeatmapLayer(workers) {
-  const pointSets = {};
-  LAYER_DEFS.forEach((def) => {
-    pointSets[def.key] = workers.map((w) => w[def.field]).filter(Boolean);
+function makeHeatmapLayer() {
+  const layer = new Heatmap({
+    source: new VectorSource(),
+    blur: 24,
+    radius: 16,
+    gradient: ['#313695', '#4575B4', '#74ADD1', '#ABD9E9', '#FFFFBF', '#FEE090', '#FDAE61', '#F46D43', '#D73027', '#A50026'],
   });
-  return createDensityHeatmap(pointSets);
+  layer.set('isHeatmap', true);
+  layer.setZIndex(1);
+  return layer;
+}
+
+// The heatmap follows the four location layers: only the location types that
+// are ticked contribute to the density, each valid point once.
+function refreshHeatmap(heatmapLayer, workers, visible) {
+  const features = buildHeatPoints(workers, visible).map(({ lon, lat, weight }) => (
+    new Feature({ geometry: new Point(fromLonLat([lon, lat])), weight })
+  ));
+  const source = heatmapLayer.getSource();
+  source.clear(true);
+  source.addFeatures(features);
+}
+
+function applyVisibility(layers, heatmapLayer, workers, visible) {
+  Object.entries(layers).forEach(([key, layer]) => layer.setVisible(!!visible[key]));
+  if (!heatmapLayer) return;
+  refreshHeatmap(heatmapLayer, workers, visible);
+  heatmapLayer.setVisible(!!visible.heatmap);
 }
 
 function makeLayer(def, workers) {
   const features = workers
-    .filter((w) => w[def.field])
+    .filter((w) => readCoord(w[def.field]))
     .map((w) => {
-      const coords = w[def.field];
+      const coords = readCoord(w[def.field]);
       const f = new Feature({ geometry: new Point(fromLonLat([coords.lon, coords.lat])) });
       f.set('name', w.employee_name);
       f.set('public_id', w.public_service_transport_id);
@@ -87,16 +106,21 @@ export default function GISMap({ visibleLayers, baseMap }) {
   const mapObjRef = useRef(null);
   const baseLayerRef = useRef(null);
   const heatmapLayerRef = useRef(null);
+  const visibleRef = useRef(visibleLayers);
+
+  // Declared before the map-building effect so a rebuilt map (new data or a
+  // language switch) always starts with the latest layer visibility.  useEffect(() => { visibleRef.current = visibleLayers; });
 
   useEffect(() => {
     const layers = {};
     LAYER_DEFS.forEach((def) => { layers[def.key] = makeLayer(def, workers); });
     layersRef.current = layers;
     Object.values(layers).forEach((layer, index) => layer.setZIndex(index + 2));
-    const heatmapLayer = makeHeatmapLayer(workers);
+    const heatmapLayer = makeHeatmapLayer();
     heatmapLayerRef.current = heatmapLayer;
+    applyVisibility(layers, heatmapLayer, workers, visibleRef.current);
 
-    const baseConfig = BASEMAPS[baseMap] || BASEMAPS.standard;
+    const baseConfig = BASEMAPS[baseMapRef.current] || BASEMAPS.standard;
     const base = new TileLayer({
       source: new XYZ({ url: baseConfig.url, attributions: baseConfig.attribution, crossOrigin: 'anonymous' }),
     });
@@ -130,7 +154,11 @@ export default function GISMap({ visibleLayers, baseMap }) {
     map.on('pointermove', (evt) => {
       // Only the regular point layers carry a `layer` property; ignore the
       // heatmap's source features so its glow cannot trigger an empty popup.
-      const feature = map.forEachFeatureAtPixel(evt.pixel, (f) => (f.get('layer') ? f : undefined));
+      const feature = map.forEachFeatureAtPixel(
+        evt.pixel,
+        (f) => (f.get('layer') ? f : undefined),
+        { layerFilter: (layer) => !layer.get('isHeatmap') },
+      );
       const target = map.getTarget();
       if (target && target.style) target.style.cursor = feature ? 'pointer' : '';
       if (feature) {
@@ -151,6 +179,11 @@ export default function GISMap({ visibleLayers, baseMap }) {
 
     return () => {
       map.setTarget(null);
+      // map.dispose() leaves layers alone; the heatmap owns a WebGL context
+      // that must be released here or rebuilt maps pile up until the browser
+      // starts dropping contexts ("Too many active WebGL contexts").
+      [base, heatmapLayer, ...Object.values(layers)].forEach((layer) => layer.dispose());
+      map.dispose();
       if (mapObjRef.current === map) mapObjRef.current = null;
       if (heatmapLayerRef.current === heatmapLayer) heatmapLayerRef.current = null;
     };
@@ -163,14 +196,7 @@ export default function GISMap({ visibleLayers, baseMap }) {
   }, [baseMap]);
 
   useEffect(() => {
-    Object.entries(layersRef.current).forEach(([key, layer]) => layer.setVisible(!!visibleLayers[key]));
-    const heatmap = heatmapLayerRef.current;
-    if (heatmap) {
-      heatmap.setVisible(!!visibleLayers.heatmap);
-      // The heatmap counts the point layers that are ticked; with none ticked
-      // it shows the density of every location.
-      heatmap.get('setActiveKeys')(LAYER_DEFS.filter((def) => visibleLayers[def.key]).map((def) => def.key));
-    }
+    applyVisibility(layersRef.current, heatmapLayerRef.current, workers, visibleLayers);
   }, [visibleLayers, workers]);
 
   return (
