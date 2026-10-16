@@ -107,6 +107,11 @@ export default function GISMap({ visibleLayers, baseMap }) {
   const baseLayerRef = useRef(null);
   const heatmapLayerRef = useRef(null);
   const visibleRef = useRef(visibleLayers);
+  const baseMapRef = useRef(baseMap);
+
+  useEffect(() => {
+  baseMapRef.current = baseMap;
+}, [baseMap]);
 
   // Declared before the map-building effect so a rebuilt map (new data or a
   // language switch) always starts with the latest layer visibility.  useEffect(() => { visibleRef.current = visibleLayers; });
