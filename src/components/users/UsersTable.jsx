@@ -16,7 +16,10 @@ export default function UsersTable({ rows, loading = false, onAdd, onToggleStatu
 
   async function submit(e) {
     e.preventDefault();
-    if (!form.name.trim()) return;
+    if (!form.name.trim() || !form.username.trim() || !form.password.trim()) {
+      setFormError(t('users.form.required_error'));
+      return;
+    }
     setSaving(true);
     setFormError('');
     const message = await onAdd({
@@ -105,8 +108,8 @@ export default function UsersTable({ rows, loading = false, onAdd, onToggleStatu
             </div>
             <form onSubmit={submit} className="account-form">
               <label><span>{t('users.form.name')}</span><input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} required /></label>
-              <label><span>{t('users.form.username')}</span><input minLength={3} placeholder={t('users.form.optional_hint')} value={form.username} onChange={(e) => setForm({ ...form, username: e.target.value })} /></label>
-              <label><span>{t('users.form.password')}</span><input type="password" minLength={8} autoComplete="new-password" placeholder={t('users.form.optional_hint')} value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} /></label>
+              <label><span>{t('users.form.username')}</span><input required minLength={3} autoComplete="off" value={form.username} onChange={(e) => setForm({ ...form, username: e.target.value })} /></label>
+              <label><span>{t('users.form.password')}</span><input type="password" required minLength={8} autoComplete="new-password" value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} /></label>
               <label><span>{t('users.form.role')}</span><select value={form.role} onChange={(e) => setForm({ ...form, role: e.target.value })}>{ROLE_OPTIONS.map((role) => <option key={role} value={role}>{roleLabel(role)}</option>)}</select></label>
               {formError && <div role="alert" style={{ color: 'var(--red-600, #B42318)', fontSize: 13 }}>{formError}</div>}
               <div className="modal-actions">

@@ -67,11 +67,15 @@ export default function Users() {
         </div>
       )}
 
-      {created?.temporary_password && (
+      {created && (
         <div className="panel" role="status" style={{ padding: '12px 14px', marginBottom: 14, fontSize: 13, display: 'flex', gap: 12, alignItems: 'center', flexWrap: 'wrap' }}>
           <span>
-            {t('users.temp_password_notice', { username: created.username })}{' '}
-            <strong className="mono">{created.temporary_password}</strong>
+            {created.temporary_password ? (
+              <>
+                {t('users.temp_password_notice', { username: created.username })}{' '}
+                <strong className="mono">{created.temporary_password}</strong>
+              </>
+            ) : t('users.created_notice', { username: created.username })}
           </span>
           <button className="btn btn-sm" onClick={() => setCreated(null)}>{t('users.close')}</button>
         </div>

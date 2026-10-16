@@ -1,7 +1,7 @@
 import { FileSpreadsheet, FileJson, FileText, ShieldCheck } from 'lucide-react';
 import { useWorkerData } from '../../context/WorkerDataContext';
 import { useLocale } from '../../context/LocaleContext';
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { recordAudit } from '../../api/audit';
 
 const FORMATS = [
@@ -13,9 +13,7 @@ const FORMATS = [
 const EXCLUDED_FIELDS = ['employee_name', 'phone_number'];
 
 const EXPORT_COLUMNS = [
-  { key: 'id', en: 'Record ID', am: 'የመዝገብ መለያ' },
   { key: 'public_service_transport_id', en: 'Public Service Transport ID', am: 'የህዝብ አገልግሎት መጓጓዣ መለያ' },
-  { key: 'reference_id', en: 'Reference ID', am: 'የማጣቀሻ መለያ' },
   { key: 'organization', en: 'Organization', am: 'ድርጅት' },
   { key: 'home_address', en: 'Home Address', am: 'የቤት አድራሻ' },
   { key: 'home_x', en: 'Home X Coordinate', am: 'የቤት X መጋጠሚያ' },
@@ -50,9 +48,7 @@ const STATUS_LABELS = {
 
 function exportRows(workers) {
   return workers.map((worker) => ({
-    id: worker.id,
     public_service_transport_id: worker.public_service_transport_id,
-    reference_id: worker.reference_id,
     organization: worker.organization,
     home_address: worker.home_address,
     home_x: worker.home_coords?.lon ?? '',
@@ -73,7 +69,24 @@ function exportRows(workers) {
   }));
 }
 
-const EXPORT_BASENAME = 'WORKERS TRANSPORT DATA';
+const ALL_BUSES = 'all';
+
+// The public ID is a 16-digit number. Spreadsheets would round it (1.5479E+15),
+// so it is always written as text.
+const TEXT_COLUMNS = new Set(['public_service_transport_id']);
+
+// File name: "Worker Transportation Data - Bus 12" (or "... - All Buses").
+function exportBasename(bus) {
+  if (bus === ALL_BUSES) return 'Worker Transportation Data - All Buses';
+  const safeBus = String(bus).replace(/[\\/:*?"<>|]+/g, '-').trim();
+  return `Worker Transportation Data - Bus ${safeBus}`;
+}
+
+function busMatches(worker, bus) {
+  if (bus === ALL_BUSES) return true;
+  return String(worker.bus_number_going ?? '').trim() === bus
+    || String(worker.bus_number_return ?? '').trim() === bus;
+}
 
 function downloadBlob(content, filename, type) {
   const blob = new Blob([content], { type });
@@ -94,22 +107,26 @@ function translatedHeaders(language) {
   return EXPORT_COLUMNS.map((column) => column[language]);
 }
 
-function exportCsv(rows, language) {
+function exportCsv(rows, language, basename) {
   const headers = translatedHeaders(language);
   const keys = EXPORT_COLUMNS.map((column) => column.key);
-  const lines = [headers.map(csvValue).join(','), ...rows.map((row) => keys.map((key) => csvValue(row[key])).join(','))];
-  downloadBlob(`\uFEFF${lines.join('\n')}`, `${EXPORT_BASENAME}.csv`, 'text/csv;charset=utf-8');
+  // ="..." makes Excel keep the full digits instead of converting to scientific notation.
+  const cell = (key, value) => (TEXT_COLUMNS.has(key) && String(value ?? '') !== ''
+    ? `="${String(value).replaceAll('"', '')}"`
+    : csvValue(value));
+  const lines = [headers.map(csvValue).join(','), ...rows.map((row) => keys.map((key) => cell(key, row[key])).join(','))];
+  downloadBlob(`\uFEFF${lines.join('\n')}`, `${basename}.csv`, 'text/csv;charset=utf-8');
 }
 
-function exportExcel(rows, language) {
+function exportExcel(rows, language, basename) {
   const headers = translatedHeaders(language);
   const keys = EXPORT_COLUMNS.map((column) => column.key);
   const esc = (value) => String(value ?? '').replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');
-  const table = `<table border="1"><thead><tr>${headers.map((h) => `<th>${esc(h)}</th>`).join('')}</tr></thead><tbody>${rows.map((row) => `<tr>${keys.map((key) => `<td>${esc(row[key])}</td>`).join('')}</tr>`).join('')}</tbody></table>`;
-  downloadBlob(`<!doctype html><html><head><meta charset="utf-8"></head><body>${table}</body></html>`, `${EXPORT_BASENAME}.xls`, 'application/vnd.ms-excel');
+  const table = `<table border="1"><thead><tr>${headers.map((h) => `<th>${esc(h)}</th>`).join('')}</tr></thead><tbody>${rows.map((row) => `<tr>${keys.map((key) => `<td${TEXT_COLUMNS.has(key) ? ' style="mso-number-format:\'\\@\'"' : ''}>${esc(row[key])}</td>`).join('')}</tr>`).join('')}</tbody></table>`;
+  downloadBlob(`<!doctype html><html><head><meta charset="utf-8"></head><body>${table}</body></html>`, `${basename}.xls`, 'application/vnd.ms-excel');
 }
 
-function exportGeoJson(workers, language) {
+function exportGeoJson(workers, language, basename) {
   const features = [];
   const label = (map, key) => map[key]?.[language] ?? key;
   workers.forEach((worker) => {
@@ -125,9 +142,7 @@ function exportGeoJson(workers, language) {
         const column = EXPORT_COLUMNS.find((item) => item.key === field);
         properties[column?.[language] ?? field] = value;
       };
-      add('public_service_transport_id', worker.public_service_transport_id);
-      add('id', worker.id);
-      add('reference_id', worker.reference_id);
+      add('public_service_transport_id', String(worker.public_service_transport_id ?? ''));
       add('organization', worker.organization);
       add('bus_number_going', worker.bus_number_going);
       add('bus_number_return', worker.bus_number_return);
@@ -144,22 +159,37 @@ function exportGeoJson(workers, language) {
       });
     });
   });
-  downloadBlob(JSON.stringify({ type: 'FeatureCollection', features }, null, 2), `${EXPORT_BASENAME}.geojson`, 'application/geo+json;charset=utf-8');
+  downloadBlob(JSON.stringify({ type: 'FeatureCollection', features }, null, 2), `${basename}.geojson`, 'application/geo+json;charset=utf-8');
 }
 
 export default function ExportsPanel() {
   const { workers } = useWorkerData();
   const { t, locale } = useLocale();
-  const [exportLanguage, setExportLanguage] = useState(locale);
-  const rows = exportRows(workers);
+  const [selectedBus, setSelectedBus] = useState(ALL_BUSES);
+  // Column names / labels follow the language the admin is currently using in the app.
+  const exportLanguage = locale === 'am' ? 'am' : 'en';
+
+  const buses = useMemo(() => Array.from(new Set(
+    workers.flatMap((w) => [w.bus_number_going, w.bus_number_return])
+      .map((b) => String(b ?? '').trim())
+      .filter(Boolean),
+  )).sort((a, b) => a.localeCompare(b, undefined, { numeric: true })), [workers]);
+
+  const filteredWorkers = useMemo(
+    () => workers.filter((w) => busMatches(w, selectedBus)),
+    [workers, selectedBus],
+  );
+  const rows = exportRows(filteredWorkers);
   const excluded = t('exports.excluded_fields');
 
   function runExport(format) {
     const label = { csv: 'CSV', excel: 'Excel', geojson: 'GeoJSON' }[format] || format;
-    recordAudit('DATA_EXPORT', `${label} export · ${rows.length} records`);
-    if (format === 'csv') exportCsv(rows, exportLanguage);
-    if (format === 'excel') exportExcel(rows, exportLanguage);
-    if (format === 'geojson') exportGeoJson(workers, exportLanguage);
+    const basename = exportBasename(selectedBus);
+    const busLabel = selectedBus === ALL_BUSES ? 'all buses' : `bus ${selectedBus}`;
+    recordAudit('DATA_EXPORT', `${label} export · ${busLabel} · ${rows.length} records`);
+    if (format === 'csv') exportCsv(rows, exportLanguage, basename);
+    if (format === 'excel') exportExcel(rows, exportLanguage, basename);
+    if (format === 'geojson') exportGeoJson(filteredWorkers, exportLanguage, basename);
   }
 
   return (
@@ -171,20 +201,22 @@ export default function ExportsPanel() {
 
       <div className="panel" style={{ padding: 18, marginBottom: 16, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 18, flexWrap: 'wrap' }}>
         <div>
-          <div style={{ fontWeight: 600, fontSize: 14, color: 'var(--ink-900)' }}>{t('exports.language_title')}</div>
-          <div style={{ fontSize: 12.5, color: 'var(--slate-500)', marginTop: 4, lineHeight: 1.5 }}>{t('exports.language_description')}</div>
+          <div style={{ fontWeight: 600, fontSize: 14, color: 'var(--ink-900)' }}>{t('exports.bus_title')}</div>
+          <div style={{ fontSize: 12.5, color: 'var(--slate-500)', marginTop: 4, lineHeight: 1.5 }}>{t('exports.bus_description')}</div>
         </div>
         <label style={{ display: 'flex', alignItems: 'center', gap: 10, fontSize: 13, color: 'var(--ink-900)' }}>
-          <span>{t('exports.language_label')}</span>
+          <span>{t('exports.bus_label')}</span>
           <select
             className="form-control"
-            value={exportLanguage}
-            onChange={(event) => setExportLanguage(event.target.value)}
+            value={selectedBus}
+            onChange={(event) => setSelectedBus(event.target.value)}
             style={{ minWidth: 160 }}
-            aria-label={t('exports.language_label')}
+            aria-label={t('exports.bus_label')}
           >
-            <option value="en">English</option>
-            <option value="am">አማርኛ</option>
+            <option value={ALL_BUSES}>{t('exports.bus_all')}</option>
+            {buses.map((bus) => (
+              <option key={bus} value={bus}>{bus}</option>
+            ))}
           </select>
         </label>
       </div>
@@ -197,8 +229,8 @@ export default function ExportsPanel() {
               <div style={{ fontWeight: 600, fontSize: 14, color: 'var(--ink-900)' }}>{t(f.labelKey)}</div>
             </div>
             <p style={{ fontSize: 12.5, color: 'var(--slate-500)', margin: 0, lineHeight: 1.5 }}>{t(f.descKey)}</p>
-            <div className="mono" style={{ fontSize: 11.5, color: 'var(--slate-500)' }}>{t('exports.records_note', { count: workers.length })}</div>
-            <button className="btn btn-primary" style={{ marginTop: 'auto', justifyContent: 'center' }} onClick={() => runExport(f.key)}>
+            <div className="mono" style={{ fontSize: 11.5, color: 'var(--slate-500)' }}>{t('exports.records_note', { count: filteredWorkers.length })}</div>
+            <button className="btn btn-primary" style={{ marginTop: 'auto', justifyContent: 'center' }} onClick={() => runExport(f.key)} disabled={filteredWorkers.length === 0}>
               {t('exports.export_button', { format: t(f.labelKey) })}
             </button>
           </div>
